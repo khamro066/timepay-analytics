@@ -13,15 +13,19 @@ def format_rate(rate) -> str:
 
 def print_table(title: str, ranked_rows: list[tuple[int, dict]]) -> None:
     print(f"\n=== {title} ===")
-    header = f"{'Rank':<6}{'Name':<30}{'Department':<20}{'Rate':<8}{'Late':<6}{'Absent':<7}"
+    header = (
+        f"{'Rank':<6}{'Name':<26}{'Department':<16}"
+        f"{'Rate':<8}{'Punct.':<8}{'Score':<8}{'Late':<6}{'Absent':<7}"
+    )
     print(header)
     print("-" * len(header))
     for rank, row in ranked_rows:
-        name = (row["full_name"] or "")[:29]
-        department = (row["department"] or "")[:19]
+        name = (row["full_name"] or "")[:25]
+        department = (row["department"] or "")[:15]
         print(
-            f"{rank:<6}{name:<30}{department:<20}"
-            f"{format_rate(row['attendance_rate']):<8}{row['late_days']:<6}{row['absent_days']:<7}"
+            f"{rank:<6}{name:<26}{department:<16}"
+            f"{format_rate(row['attendance_rate']):<8}{format_rate(row['punctuality_rate']):<8}"
+            f"{format_rate(row['overall_score']):<8}{row['late_days']:<6}{row['absent_days']:<7}"
         )
 
 
