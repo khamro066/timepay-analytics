@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.api.deps import get_current_user
 from app.services.analytics_service import (
     get_all_employees_ranking,
     get_daily_company_stats,
@@ -7,7 +8,7 @@ from app.services.analytics_service import (
     get_employee_summary,
 )
 
-router = APIRouter(prefix="/api", tags=["analytics"])
+router = APIRouter(prefix="/api", tags=["analytics"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/employees/{employee_id}/summary")

@@ -4,3 +4,5 @@ sqlalchemy
 requests
 python-dotenv
 apscheduler
+bcrypt
+pyjwt
