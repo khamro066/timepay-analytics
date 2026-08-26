@@ -5,13 +5,18 @@ from app.models.attendance import DailyAttendance, Employee
 from app.services.timepay_client import TimePayClient
 
 
-def sync_day(date: str) -> int:
+def sync_day(date: str, client: TimePayClient | None = None) -> int:
     """Fetches employee daily stats for `date` (YYYY-MM-DD) from Time Pay
     and upserts them into the Employee and DailyAttendance tables.
 
+    Pass an existing `client` when calling this repeatedly in the same
+    process (backfills, the scheduler) so the rotating refresh token is
+    reused instead of each call starting from a stale one read at
+    process startup.
+
     Returns the number of employee records synced.
     """
-    client = TimePayClient()
+    client = client or TimePayClient()
     records = client.fetch_daily_stats(date)
     attendance_date = datetime.strptime(date, "%Y-%m-%d").date()
 
