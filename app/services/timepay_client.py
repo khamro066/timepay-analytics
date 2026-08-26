@@ -12,9 +12,14 @@ class TimePayClient:
     Auth: POST {"refresh": ...} to REFRESH_ENDPOINT to get back a fresh
     {"access": ..., "refresh": ...} pair. Time Pay rotates the refresh
     token on every call, so the new one is kept in memory for the rest of
-    this run and persisted back to .env so later runs pick it up. The
-    access-token itself is sent as a cookie (not an Authorization header)
-    on API calls, matching what the browser does.
+    this run and persisted back to .env so later runs pick it up.
+
+    The access-token is sent as an `Authorization: Bearer` header on API
+    calls. The "access-token" cookie visible in the browser turned out to
+    be for the site's own pages, not this API: a cookie-only request to
+    employee-daily-stats came back 401 with `WWW-Authenticate: Bearer
+    realm="api"` and body {"detail": "Authentication credentials were
+    not provided."}; switching to a Bearer header returned 200.
     """
 
     def __init__(self) -> None:
@@ -32,7 +37,6 @@ class TimePayClient:
         self.access_token = data["access"]
         self.refresh_token = data["refresh"]
 
-        self.session.cookies.set("access-token", self.access_token)
         set_key(str(ENV_PATH), "TIMEPAY_REFRESH_TOKEN", self.refresh_token)
 
         return self.access_token
@@ -41,11 +45,13 @@ class TimePayClient:
         if self.access_token is None:
             self.get_access_token()
 
-        response = self.session.post(url, params=params, json=json_body)
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        response = self.session.post(url, params=params, json=json_body, headers=headers)
 
         if response.status_code == 401:
             self.get_access_token()
-            response = self.session.post(url, params=params, json=json_body)
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = self.session.post(url, params=params, json=json_body, headers=headers)
 
         response.raise_for_status()
         return response.json()
