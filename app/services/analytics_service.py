@@ -68,21 +68,44 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
                 DailyAttendance.date >= start,
                 DailyAttendance.date <= end,
             )
+            .order_by(DailyAttendance.date)
             .all()
         )
+
+        days = [
+            {
+                "date": r.date.isoformat(),
+                "is_working_day": r.is_working_day,
+                "is_holiday": r.is_holiday,
+                "absent": r.absent,
+                "on_leave": r.on_leave,
+                "late": r.late,
+                "late_minutes": r.late_minutes,
+                "early_leaving": r.early_leaving,
+                "actual_worked_minutes": r.actual_worked_minutes,
+                "first_check_in": r.first_check_in,
+                "last_check_out": r.last_check_out,
+                "last_action": r.last_action,
+            }
+            for r in rows
+        ]
 
         return {
             "employee_id": employee_id,
             "full_name": employee.full_name if employee else None,
+            "department": employee.department if employee else None,
+            "position": employee.position if employee else None,
+            "profile_image": employee.profile_image if employee else None,
             "date_from": date_from,
             "date_to": date_to,
             **_summarize_rows(rows),
+            "days": days,
         }
     finally:
         db.close()
 
 
-def get_all_employees_ranking(date_from: str, date_to: str) -> list[dict]:
+def get_all_employees_ranking(date_from: str, date_to: str, department: str | None = None) -> list[dict]:
     start = _parse_date(date_from)
     end = _parse_date(date_to)
 
@@ -103,11 +126,14 @@ def get_all_employees_ranking(date_from: str, date_to: str) -> list[dict]:
         ranking = []
         for employee_id, emp_rows in rows_by_employee.items():
             employee = employees.get(employee_id)
+            employee_department = employee.department if employee else None
+            if department and employee_department != department:
+                continue
             ranking.append(
                 {
                     "employee_id": employee_id,
                     "full_name": employee.full_name if employee else None,
-                    "department": employee.department if employee else None,
+                    "department": employee_department,
                     "position": employee.position if employee else None,
                     **_summarize_rows(emp_rows),
                 }
@@ -157,6 +183,8 @@ def get_department_summary(date_from: str, date_to: str) -> list[dict]:
                     "department": department,
                     "employee_count": len(employees_by_department[department]),
                     "average_attendance_rate": summary["attendance_rate"],
+                    "average_punctuality_rate": summary["punctuality_rate"],
+                    "average_overall_score": summary["overall_score"],
                     "total_late_incidents": summary["late_days"],
                     "total_absent_incidents": summary["absent_days"],
                     "total_early_leaving_incidents": summary["early_leaving_days"],
@@ -164,7 +192,7 @@ def get_department_summary(date_from: str, date_to: str) -> list[dict]:
                 }
             )
 
-        summaries.sort(key=lambda d: -(d["average_attendance_rate"] or 0.0))
+        summaries.sort(key=lambda d: -(d["average_overall_score"] or 0.0))
         return summaries
     finally:
         db.close()
