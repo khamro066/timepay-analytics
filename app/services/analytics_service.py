@@ -135,6 +135,7 @@ def get_all_employees_ranking(date_from: str, date_to: str, department: str | No
                     "full_name": employee.full_name if employee else None,
                     "department": employee_department,
                     "position": employee.position if employee else None,
+                    "profile_image": employee.profile_image if employee else None,
                     **_summarize_rows(emp_rows),
                 }
             )
