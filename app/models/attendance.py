@@ -46,6 +46,7 @@ class DailyAttendance(Base):
     early_leaving_minutes = Column(Integer, nullable=True)
     expected_worked_minutes = Column(Integer, nullable=True)
     actual_worked_minutes = Column(Integer, nullable=True)
+    extra_worked_minutes = Column(Integer, nullable=True)
     first_check_in = Column(String, nullable=True)
     last_check_out = Column(String, nullable=True)
     last_action = Column(String, nullable=True)

@@ -56,6 +56,7 @@ def sync_day(date: str, client: TimePayClient | None = None) -> int:
             attendance.early_leaving_minutes = stats.get("early_leaving_minutes")
             attendance.expected_worked_minutes = stats.get("expected_worked_minutes")
             attendance.actual_worked_minutes = stats.get("actual_worked_minutes")
+            attendance.extra_worked_minutes = stats.get("extra_worked_minutes")
             attendance.first_check_in = stats.get("first_check_in")
             attendance.last_check_out = stats.get("last_check_out")
             attendance.last_action = stats.get("last_action")
