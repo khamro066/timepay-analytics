@@ -65,6 +65,16 @@ def _summarize_rows(rows: list[DailyAttendance]) -> dict:
     )
 
     total_worked_minutes = sum(r.actual_worked_minutes or 0 for r in rows)
+    absent_days = sum(1 for r in working_rows if r.absent)
+
+    # Time Pay has no signal that distinguishes an excused absence (approved
+    # leave) from an unexcused one — every absence in real data has
+    # has_day_application=False (see investigation notes). excused_absence_days
+    # is a placeholder for a future manual-override flow; unexcused is
+    # derived from it so the two always sum to absent_days.
+    excused_absence_days = 0
+    unexcused_absence_days = absent_days - excused_absence_days
+
     present_rows = [r for r in working_rows if not r.absent]
 
     return {
@@ -72,7 +82,9 @@ def _summarize_rows(rows: list[DailyAttendance]) -> dict:
         "total_worked_formatted": _format_worked_minutes(total_worked_minutes),
         "total_late_minutes": sum(r.late_minutes or 0 for r in rows),
         "late_days": sum(1 for r in working_rows if r.late),
-        "absent_days": sum(1 for r in working_rows if r.absent),
+        "absent_days": absent_days,
+        "excused_absence_days": excused_absence_days,
+        "unexcused_absence_days": unexcused_absence_days,
         "early_leaving_days": sum(1 for r in working_rows if r.early_leaving),
         "expected_working_days": expected_working_days,
         "present_days": present_days,
