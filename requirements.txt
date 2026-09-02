@@ -6,3 +6,4 @@ python-dotenv
 apscheduler
 bcrypt
 pyjwt
+openpyxl
