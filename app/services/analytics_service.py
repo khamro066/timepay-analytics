@@ -10,6 +10,30 @@ def _parse_date(value: str) -> date_cls:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def _avg_time_str(time_strings: list[str]) -> str | None:
+    """Averages a list of "HH:MM" strings by converting to minutes-since-
+    midnight, averaging, and converting back. None if the list is empty."""
+    minutes = []
+    for value in time_strings:
+        if not value:
+            continue
+        try:
+            hours, mins = value.split(":")
+            minutes.append(int(hours) * 60 + int(mins))
+        except (ValueError, AttributeError):
+            continue
+
+    if not minutes:
+        return None
+
+    avg = round(sum(minutes) / len(minutes))
+    return f"{avg // 60:02d}:{avg % 60:02d}"
+
+
+def _format_worked_minutes(total_minutes: int) -> str:
+    return f"{total_minutes // 60}h {total_minutes % 60}m"
+
+
 def _summarize_rows(rows: list[DailyAttendance]) -> dict:
     """Aggregates a set of DailyAttendance rows into summary metrics.
 
@@ -40,8 +64,12 @@ def _summarize_rows(rows: list[DailyAttendance]) -> dict:
         else None
     )
 
+    total_worked_minutes = sum(r.actual_worked_minutes or 0 for r in rows)
+    present_rows = [r for r in working_rows if not r.absent]
+
     return {
-        "total_worked_minutes": sum(r.actual_worked_minutes or 0 for r in rows),
+        "total_worked_minutes": total_worked_minutes,
+        "total_worked_formatted": _format_worked_minutes(total_worked_minutes),
         "total_late_minutes": sum(r.late_minutes or 0 for r in rows),
         "late_days": sum(1 for r in working_rows if r.late),
         "absent_days": sum(1 for r in working_rows if r.absent),
@@ -51,6 +79,8 @@ def _summarize_rows(rows: list[DailyAttendance]) -> dict:
         "attendance_rate": attendance_rate,
         "punctuality_rate": punctuality_rate,
         "overall_score": overall_score,
+        "average_check_in_time": _avg_time_str([r.first_check_in for r in present_rows]),
+        "average_check_out_time": _avg_time_str([r.last_check_out for r in present_rows]),
     }
 
 
