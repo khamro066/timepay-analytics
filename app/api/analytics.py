@@ -18,13 +18,18 @@ def employee_summary(employee_id: int, date_from: str = Query(...), date_to: str
 
 
 @router.get("/ranking")
-def ranking(date_from: str = Query(...), date_to: str = Query(...), department: str | None = Query(None)):
-    return get_all_employees_ranking(date_from, date_to, department)
+def ranking(
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    department: str | None = Query(None),
+    include_archived: bool = Query(False),
+):
+    return get_all_employees_ranking(date_from, date_to, department, include_archived)
 
 
 @router.get("/departments/summary")
-def department_summary(date_from: str = Query(...), date_to: str = Query(...)):
-    return get_department_summary(date_from, date_to)
+def department_summary(date_from: str = Query(...), date_to: str = Query(...), include_archived: bool = Query(False)):
+    return get_department_summary(date_from, date_to, include_archived)
 
 
 @router.get("/company/daily-stats")

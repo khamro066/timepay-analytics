@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router
+from app.api.employees import router as employees_router
 from app.api.notes import router as notes_router
 from app.api.reports import router as reports_router
 
@@ -21,6 +22,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(analytics_router)
+app.include_router(employees_router)
 app.include_router(notes_router)
 app.include_router(reports_router)
 

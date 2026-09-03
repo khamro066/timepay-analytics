@@ -138,6 +138,7 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
             "department": employee.department if employee else None,
             "position": employee.position if employee else None,
             "profile_image": employee.profile_image if employee else None,
+            "status": employee.status if employee else None,
             "date_from": date_from,
             "date_to": date_to,
             **_summarize_rows(rows),
@@ -147,7 +148,9 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
         db.close()
 
 
-def get_all_employees_ranking(date_from: str, date_to: str, department: str | None = None) -> list[dict]:
+def get_all_employees_ranking(
+    date_from: str, date_to: str, department: str | None = None, include_archived: bool = False
+) -> list[dict]:
     start = _parse_date(date_from)
     end = _parse_date(date_to)
 
@@ -171,6 +174,11 @@ def get_all_employees_ranking(date_from: str, date_to: str, department: str | No
             employee_department = employee.department if employee else None
             if department and employee_department != department:
                 continue
+            # "active" is the only status included by default — paused and
+            # archived employees are hidden from rankings/reports unless the
+            # caller explicitly asks to see them (e.g. a historical report).
+            if not include_archived and employee is not None and employee.status != "active":
+                continue
             ranking.append(
                 {
                     "employee_id": employee_id,
@@ -178,6 +186,7 @@ def get_all_employees_ranking(date_from: str, date_to: str, department: str | No
                     "department": employee_department,
                     "position": employee.position if employee else None,
                     "profile_image": employee.profile_image if employee else None,
+                    "status": employee.status if employee else None,
                     **_summarize_rows(emp_rows),
                 }
             )
@@ -194,7 +203,7 @@ def get_all_employees_ranking(date_from: str, date_to: str, department: str | No
         db.close()
 
 
-def get_department_summary(date_from: str, date_to: str) -> list[dict]:
+def get_department_summary(date_from: str, date_to: str, include_archived: bool = False) -> list[dict]:
     """Per-department metrics, pooling every employee's attendance rows in
     that department together — so average_attendance_rate is total present
     days / total expected days across the whole department, not a simple
@@ -204,12 +213,14 @@ def get_department_summary(date_from: str, date_to: str) -> list[dict]:
 
     db = SessionLocal()
     try:
-        rows = (
+        query = (
             db.query(DailyAttendance, Employee.department)
             .join(Employee, Employee.id == DailyAttendance.employee_id)
             .filter(DailyAttendance.date >= start, DailyAttendance.date <= end)
-            .all()
         )
+        if not include_archived:
+            query = query.filter(Employee.status == "active")
+        rows = query.all()
 
         attendance_by_department: dict[str, list[DailyAttendance]] = defaultdict(list)
         employees_by_department: dict[str, set[int]] = defaultdict(set)
@@ -301,11 +312,18 @@ def get_lateness_distribution(date_from: str, date_to: str, department: str | No
 
 
 def get_daily_company_stats(date: str) -> dict:
+    """Today's headcount only ever reflects currently-active employees —
+    paused/archived people never show up as "absent today"."""
     day = _parse_date(date)
 
     db = SessionLocal()
     try:
-        rows = db.query(DailyAttendance).filter(DailyAttendance.date == day).all()
+        rows = (
+            db.query(DailyAttendance)
+            .join(Employee, Employee.id == DailyAttendance.employee_id)
+            .filter(DailyAttendance.date == day, Employee.status == "active")
+            .all()
+        )
 
         return {
             "date": date,

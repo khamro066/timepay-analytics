@@ -8,13 +8,23 @@ router = APIRouter(prefix="/api/reports", tags=["reports"], dependencies=[Depend
 
 
 @router.get("")
-def report_data(date_from: str = Query(...), date_to: str = Query(...), period_key: str = Query(...)):
-    return get_report_rows(date_from, date_to, period_key)
+def report_data(
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    period_key: str = Query(...),
+    include_archived: bool = Query(False),
+):
+    return get_report_rows(date_from, date_to, period_key, include_archived)
 
 
 @router.get("/export")
-def export_report(date_from: str = Query(...), date_to: str = Query(...), period_key: str = Query(...)):
-    buffer = build_report_workbook(date_from, date_to, period_key)
+def export_report(
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    period_key: str = Query(...),
+    include_archived: bool = Query(False),
+):
+    buffer = build_report_workbook(date_from, date_to, period_key, include_archived)
     filename = f"hisobot_{date_from}_{date_to}.xlsx"
     return StreamingResponse(
         buffer,

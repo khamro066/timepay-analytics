@@ -24,6 +24,7 @@ class Employee(Base):
     position = Column(String, nullable=True)
     branch = Column(String, nullable=True)
     profile_image = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="active")
 
     attendances = relationship("DailyAttendance", back_populates="employee")
 

@@ -29,20 +29,24 @@ def _uzbek_worked_hours(total_minutes: int) -> str:
     return f"{total_minutes // 60} soat {total_minutes % 60} daq"
 
 
-def get_report_rows(date_from: str, date_to: str, period_key: str) -> list[dict]:
+def get_report_rows(date_from: str, date_to: str, period_key: str, include_archived: bool = False) -> list[dict]:
     """Per-employee report data: the ranking fields (which already carry
     everything from _summarize_rows, computed over date_from..date_to) plus
     that employee's note for the given calendar period_key, if any. Shared
     by the on-screen Reports page and the Excel export so both always
-    agree."""
-    ranking = get_all_employees_ranking(date_from, date_to)
+    agree.
+
+    include_archived surfaces paused/archived employees too — off by
+    default so current reports stay focused on active staff, but available
+    for a historical report that should include people no longer active."""
+    ranking = get_all_employees_ranking(date_from, date_to, include_archived=include_archived)
     notes_by_employee = {n["employee_id"]: n["note"] for n in get_notes(period_key)}
 
     return [{**r, "note": notes_by_employee.get(r["employee_id"], "")} for r in ranking]
 
 
-def build_report_workbook(date_from: str, date_to: str, period_key: str) -> io.BytesIO:
-    rows = get_report_rows(date_from, date_to, period_key)
+def build_report_workbook(date_from: str, date_to: str, period_key: str, include_archived: bool = False) -> io.BytesIO:
+    rows = get_report_rows(date_from, date_to, period_key, include_archived)
 
     by_department: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
