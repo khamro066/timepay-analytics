@@ -241,6 +241,65 @@ def get_department_summary(date_from: str, date_to: str) -> list[dict]:
         db.close()
 
 
+LATENESS_BUCKETS = [
+    ("on_time", 0, 0),
+    ("late_5_15", 1, 14),
+    ("late_15_30", 15, 29),
+    ("late_30_plus", 30, None),
+]
+
+
+def get_lateness_distribution(date_from: str, date_to: str, department: str | None = None) -> dict:
+    """Buckets check-ins by how late they were, using Time Pay's own
+    late_minutes (there is no schedule/expected-start-time model on our side
+    to compute "how early" someone arrived, so — unlike a from-scratch
+    lateness calculation — this has no "arrived early" bucket; on-time and
+    early are indistinguishable in our data and are reported together as
+    "on_time")."""
+    start = _parse_date(date_from)
+    end = _parse_date(date_to)
+
+    db = SessionLocal()
+    try:
+        query = (
+            db.query(DailyAttendance)
+            .join(Employee, Employee.id == DailyAttendance.employee_id)
+            .filter(
+                DailyAttendance.date >= start,
+                DailyAttendance.date <= end,
+                DailyAttendance.is_working_day.is_(True),
+                DailyAttendance.absent.is_(False),
+                DailyAttendance.first_check_in.isnot(None),
+            )
+        )
+        if department:
+            query = query.filter(Employee.department == department)
+        rows = query.all()
+
+        counts = {key: 0 for key, _, _ in LATENESS_BUCKETS}
+        for r in rows:
+            minutes = r.late_minutes or 0 if r.late else 0
+            for key, lo, hi in LATENESS_BUCKETS:
+                if minutes >= lo and (hi is None or minutes <= hi):
+                    counts[key] += 1
+                    break
+
+        total = len(rows)
+        return {
+            "total": total,
+            "buckets": [
+                {
+                    "key": key,
+                    "count": counts[key],
+                    "pct": round((counts[key] / total) * 100) if total else 0,
+                }
+                for key, _, _ in LATENESS_BUCKETS
+            ],
+        }
+    finally:
+        db.close()
+
+
 def get_daily_company_stats(date: str) -> dict:
     day = _parse_date(date)
 

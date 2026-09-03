@@ -6,6 +6,7 @@ from app.services.analytics_service import (
     get_daily_company_stats,
     get_department_summary,
     get_employee_summary,
+    get_lateness_distribution,
 )
 
 router = APIRouter(prefix="/api", tags=["analytics"], dependencies=[Depends(get_current_user)])
@@ -29,3 +30,8 @@ def department_summary(date_from: str = Query(...), date_to: str = Query(...)):
 @router.get("/company/daily-stats")
 def daily_stats(date: str = Query(...)):
     return get_daily_company_stats(date)
+
+
+@router.get("/lateness-distribution")
+def lateness_distribution(date_from: str = Query(...), date_to: str = Query(...), department: str | None = Query(None)):
+    return get_lateness_distribution(date_from, date_to, department)
