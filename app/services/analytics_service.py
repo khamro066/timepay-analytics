@@ -4,6 +4,7 @@ from datetime import datetime
 
 from app.core.database import SessionLocal
 from app.models.attendance import DailyAttendance, Employee
+from app.services.leave_service import get_leave_day_set
 
 
 def _parse_date(value: str) -> date_cls:
@@ -34,7 +35,7 @@ def _format_worked_minutes(total_minutes: int) -> str:
     return f"{total_minutes // 60}h {total_minutes % 60}m"
 
 
-def _summarize_rows(rows: list[DailyAttendance]) -> dict:
+def _summarize_rows(rows: list[DailyAttendance], leave_days: set[tuple[int, date_cls]] | None = None) -> dict:
     """Aggregates a set of DailyAttendance rows into summary metrics.
 
     "Expected working days" = rows where is_working_day is True.
@@ -67,12 +68,13 @@ def _summarize_rows(rows: list[DailyAttendance]) -> dict:
     total_worked_minutes = sum(r.actual_worked_minutes or 0 for r in rows)
     absent_days = sum(1 for r in working_rows if r.absent)
 
-    # Time Pay has no signal that distinguishes an excused absence (approved
-    # leave) from an unexcused one — every absence in real data has
-    # has_day_application=False (see investigation notes). excused_absence_days
-    # is a placeholder for a future manual-override flow; unexcused is
-    # derived from it so the two always sum to absent_days.
-    excused_absence_days = 0
+    # Time Pay has no signal that distinguishes an excused absence from an
+    # unexcused one — every absence in real data has has_day_application=
+    # False. We fill that gap with manually-recorded EmployeeLeave ranges:
+    # an absent working day covered by a leave range is excused, everything
+    # else absent counts as unexcused.
+    leave_days = leave_days or set()
+    excused_absence_days = sum(1 for r in working_rows if r.absent and (r.employee_id, r.date) in leave_days)
     unexcused_absence_days = absent_days - excused_absence_days
 
     present_rows = [r for r in working_rows if not r.absent]
@@ -113,6 +115,7 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
             .order_by(DailyAttendance.date)
             .all()
         )
+        leave_days = get_leave_day_set({employee_id}, start, end)
 
         days = [
             {
@@ -121,6 +124,7 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
                 "is_holiday": r.is_holiday,
                 "absent": r.absent,
                 "on_leave": r.on_leave,
+                "excused": (r.employee_id, r.date) in leave_days,
                 "late": r.late,
                 "late_minutes": r.late_minutes,
                 "early_leaving": r.early_leaving,
@@ -141,7 +145,7 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
             "status": employee.status if employee else None,
             "date_from": date_from,
             "date_to": date_to,
-            **_summarize_rows(rows),
+            **_summarize_rows(rows, leave_days),
             "days": days,
         }
     finally:
@@ -167,6 +171,7 @@ def get_all_employees_ranking(
             rows_by_employee[row.employee_id].append(row)
 
         employees = {e.id: e for e in db.query(Employee).all()}
+        leave_days = get_leave_day_set(set(rows_by_employee.keys()), start, end)
 
         ranking = []
         for employee_id, emp_rows in rows_by_employee.items():
@@ -187,7 +192,7 @@ def get_all_employees_ranking(
                     "position": employee.position if employee else None,
                     "profile_image": employee.profile_image if employee else None,
                     "status": employee.status if employee else None,
-                    **_summarize_rows(emp_rows),
+                    **_summarize_rows(emp_rows, leave_days),
                 }
             )
 
@@ -224,14 +229,17 @@ def get_department_summary(date_from: str, date_to: str, include_archived: bool 
 
         attendance_by_department: dict[str, list[DailyAttendance]] = defaultdict(list)
         employees_by_department: dict[str, set[int]] = defaultdict(set)
+        all_employee_ids: set[int] = set()
         for attendance, department in rows:
             key = department or "Unknown"
             attendance_by_department[key].append(attendance)
             employees_by_department[key].add(attendance.employee_id)
+            all_employee_ids.add(attendance.employee_id)
+        leave_days = get_leave_day_set(all_employee_ids, start, end)
 
         summaries = []
         for department, dept_rows in attendance_by_department.items():
-            summary = _summarize_rows(dept_rows)
+            summary = _summarize_rows(dept_rows, leave_days)
             summaries.append(
                 {
                     "department": department,
