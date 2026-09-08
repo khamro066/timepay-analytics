@@ -4,6 +4,7 @@ from app.api.deps import get_current_user
 from app.services.analytics_service import (
     get_all_employees_ranking,
     get_daily_company_stats,
+    get_day_of_week_stats,
     get_department_summary,
     get_employee_summary,
     get_lateness_distribution,
@@ -40,3 +41,8 @@ def daily_stats(date: str = Query(...)):
 @router.get("/lateness-distribution")
 def lateness_distribution(date_from: str = Query(...), date_to: str = Query(...), department: str | None = Query(None)):
     return get_lateness_distribution(date_from, date_to, department)
+
+
+@router.get("/day-of-week-stats")
+def day_of_week_stats(date_from: str = Query(...), date_to: str = Query(...), department: str | None = Query(None)):
+    return get_day_of_week_stats(date_from, date_to, department)

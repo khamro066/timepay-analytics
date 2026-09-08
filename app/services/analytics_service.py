@@ -319,6 +319,58 @@ def get_lateness_distribution(date_from: str, date_to: str, department: str | No
         db.close()
 
 
+WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def get_day_of_week_stats(date_from: str, date_to: str, department: str | None = None) -> list[dict]:
+    """Buckets working-day attendance rows by weekday (Python's date.weekday():
+    0=Monday..6=Sunday) so callers can see which day of the week tends to have
+    the most lateness/absence. Rates are out of working-day rows only, matching
+    how attendance_rate/punctuality_rate are computed elsewhere."""
+    start = _parse_date(date_from)
+    end = _parse_date(date_to)
+
+    db = SessionLocal()
+    try:
+        query = (
+            db.query(DailyAttendance)
+            .join(Employee, Employee.id == DailyAttendance.employee_id)
+            .filter(
+                DailyAttendance.date >= start,
+                DailyAttendance.date <= end,
+                DailyAttendance.is_working_day.is_(True),
+            )
+        )
+        if department:
+            query = query.filter(Employee.department == department)
+        rows = query.all()
+
+        totals = [0] * 7
+        late_counts = [0] * 7
+        absent_counts = [0] * 7
+        for r in rows:
+            idx = r.date.weekday()
+            totals[idx] += 1
+            if r.late:
+                late_counts[idx] += 1
+            if r.absent:
+                absent_counts[idx] += 1
+
+        return [
+            {
+                "key": WEEKDAY_KEYS[i],
+                "total": totals[i],
+                "late_count": late_counts[i],
+                "absent_count": absent_counts[i],
+                "late_rate": (late_counts[i] / totals[i]) if totals[i] else None,
+                "absent_rate": (absent_counts[i] / totals[i]) if totals[i] else None,
+            }
+            for i in range(7)
+        ]
+    finally:
+        db.close()
+
+
 def get_daily_company_stats(date: str) -> dict:
     """Today's headcount only ever reflects currently-active employees —
     paused/archived people never show up as "absent today"."""
