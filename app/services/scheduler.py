@@ -12,16 +12,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("timepay.scheduler")
 
-# Shared across every scheduled run so the rotating refresh token carries
-# forward correctly instead of each run starting from a stale one.
-client = TimePayClient()
+# Built lazily (not at import time) so run_scheduler.py gets a chance to
+# create the app_config table first; shared across scheduled runs afterward
+# so the rotating refresh token carries forward in memory between them.
+_client: TimePayClient | None = None
+
+
+def _get_client() -> TimePayClient:
+    global _client
+    if _client is None:
+        _client = TimePayClient()
+    return _client
 
 
 def run_daily_sync() -> None:
     today = date.today().isoformat()
     logger.info("Starting scheduled sync for %s", today)
     try:
-        count = sync_day(today, client=client)
+        count = sync_day(today, client=_get_client())
         logger.info("Sync succeeded for %s: %d record(s)", today, count)
     except Exception:
         logger.exception("Sync failed for %s", today)

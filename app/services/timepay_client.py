@@ -1,9 +1,10 @@
 import requests
-from dotenv import set_key
 
-from app.core.config import ENV_PATH, settings
+from app.core.config import settings
+from app.services.app_config_service import get_config, set_config
 
 EMPLOYEE_DAILY_STATS_ENDPOINT = "/api/v1/user/employee-daily-stats/"
+REFRESH_TOKEN_CONFIG_KEY = "timepay_refresh_token"
 
 
 class TimePayClient:
@@ -12,7 +13,11 @@ class TimePayClient:
     Auth: POST {"refresh": ...} to REFRESH_ENDPOINT to get back a fresh
     {"access": ..., "refresh": ...} pair. Time Pay rotates the refresh
     token on every call, so the new one is kept in memory for the rest of
-    this run and persisted back to .env so later runs pick it up.
+    this run and persisted to the app_config table so later runs — including
+    a separate Render cron job container, which shares the database but not
+    a local disk — pick it up. TIMEPAY_REFRESH_TOKEN in the environment is
+    only used to seed app_config the very first time (i.e. when no row for
+    REFRESH_TOKEN_CONFIG_KEY exists yet).
 
     The access-token is sent as an `Authorization: Bearer` header on API
     calls. The "access-token" cookie visible in the browser turned out to
@@ -25,7 +30,7 @@ class TimePayClient:
     def __init__(self) -> None:
         self.session = requests.Session()
         self.access_token: str | None = None
-        self.refresh_token: str = settings.timepay_refresh_token
+        self.refresh_token: str = get_config(REFRESH_TOKEN_CONFIG_KEY) or settings.timepay_refresh_token
 
     def get_access_token(self) -> str:
         """Exchanges the current refresh token for a new access/refresh pair."""
@@ -37,7 +42,7 @@ class TimePayClient:
         self.access_token = data["access"]
         self.refresh_token = data["refresh"]
 
-        set_key(str(ENV_PATH), "TIMEPAY_REFRESH_TOKEN", self.refresh_token)
+        set_config(REFRESH_TOKEN_CONFIG_KEY, self.refresh_token)
 
         return self.access_token
 
