@@ -37,8 +37,8 @@ def department_summary(date_from: str = Query(...), date_to: str = Query(...), i
 
 
 @router.get("/company/daily-stats")
-def daily_stats(date: str = Query(...)):
-    return get_daily_company_stats(date)
+def daily_stats(date: str = Query(...), department: str | None = Query(None)):
+    return get_daily_company_stats(date, department)
 
 
 @router.get("/lateness-distribution")

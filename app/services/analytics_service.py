@@ -474,19 +474,22 @@ def get_schedule_matrix(
         db.close()
 
 
-def get_daily_company_stats(date: str) -> dict:
+def get_daily_company_stats(date: str, department: str | None = None) -> dict:
     """Today's headcount only ever reflects currently-active employees —
-    paused/archived people never show up as "absent today"."""
+    paused/archived people never show up as "absent today". An optional
+    department narrows the counts to one business/branch."""
     day = _parse_date(date)
 
     db = SessionLocal()
     try:
-        rows = (
+        query = (
             db.query(DailyAttendance)
             .join(Employee, Employee.id == DailyAttendance.employee_id)
             .filter(DailyAttendance.date == day, Employee.status == "active")
-            .all()
         )
+        if department:
+            query = query.filter(Employee.department == department)
+        rows = query.all()
 
         return {
             "date": date,
