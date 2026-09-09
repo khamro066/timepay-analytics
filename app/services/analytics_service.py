@@ -1,6 +1,6 @@
 from collections import defaultdict
 from datetime import date as date_cls
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.core.database import SessionLocal
 from app.models.attendance import DailyAttendance, Employee
@@ -367,6 +367,109 @@ def get_day_of_week_stats(date_from: str, date_to: str, department: str | None =
             }
             for i in range(7)
         ]
+    finally:
+        db.close()
+
+
+def _schedule_day_status(row: DailyAttendance | None, excused: bool) -> str:
+    """Status for a single employee/day cell in the schedule matrix.
+
+    Precedence mirrors the Employee-detail calendar (EmployeeCalendarHeatmap):
+    a missing row is "no_data" (a day with no file uploaded is not an
+    absence — see the design-reference notes), then holiday / non-working
+    day take precedence over attendance, then an absence covered by a
+    recorded EmployeeLeave range is "excused", then plain absence, then
+    lateness, otherwise "on_time" (Time Pay can't tell "on time" from
+    "early", so the two are reported together — same as
+    get_lateness_distribution)."""
+    if row is None:
+        return "no_data"
+    if row.is_holiday:
+        return "holiday"
+    if not row.is_working_day:
+        return "day_off"
+    if row.absent:
+        return "excused" if excused else "absent"
+    if row.late:
+        return "late"
+    return "on_time"
+
+
+def get_schedule_matrix(
+    date_from: str, date_to: str, department: str | None = None, include_archived: bool = False
+) -> dict:
+    """Company-wide attendance grid: one row per employee, one column per
+    calendar date in [date_from, date_to], every cell a derived status.
+
+    Employee selection matches the ranking/report endpoints — only
+    employees with at least one attendance row somewhere in the range, and
+    only "active" staff unless include_archived is set, optionally narrowed
+    to a single department. Rows come back ordered by department then name
+    so the grid reads top-to-bottom like an org list; each employee's
+    "days" list is aligned to (and the same length as) the top-level
+    "dates" list.
+    """
+    start = _parse_date(date_from)
+    end = _parse_date(date_to)
+
+    dates: list[date_cls] = []
+    day = start
+    while day <= end:
+        dates.append(day)
+        day += timedelta(days=1)
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(DailyAttendance)
+            .filter(DailyAttendance.date >= start, DailyAttendance.date <= end)
+            .all()
+        )
+
+        rows_by_employee: dict[int, dict[date_cls, DailyAttendance]] = defaultdict(dict)
+        for row in rows:
+            rows_by_employee[row.employee_id][row.date] = row
+
+        employees = {e.id: e for e in db.query(Employee).all()}
+        leave_days = get_leave_day_set(set(rows_by_employee.keys()), start, end)
+
+        matrix = []
+        for employee_id, by_date in rows_by_employee.items():
+            employee = employees.get(employee_id)
+            employee_department = employee.department if employee else None
+            if department and employee_department != department:
+                continue
+            if not include_archived and employee is not None and employee.status != "active":
+                continue
+
+            matrix.append(
+                {
+                    "employee_id": employee_id,
+                    "full_name": employee.full_name if employee else None,
+                    "department": employee_department,
+                    "position": employee.position if employee else None,
+                    "profile_image": employee.profile_image if employee else None,
+                    "status": employee.status if employee else None,
+                    "days": [
+                        {
+                            "date": d.isoformat(),
+                            "status": _schedule_day_status(
+                                by_date.get(d), (employee_id, d) in leave_days
+                            ),
+                        }
+                        for d in dates
+                    ],
+                }
+            )
+
+        matrix.sort(key=lambda r: ((r["department"] or "").lower(), (r["full_name"] or "").lower()))
+
+        return {
+            "date_from": date_from,
+            "date_to": date_to,
+            "dates": [d.isoformat() for d in dates],
+            "employees": matrix,
+        }
     finally:
         db.close()
 
