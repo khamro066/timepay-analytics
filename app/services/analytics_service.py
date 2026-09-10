@@ -2,6 +2,8 @@ from collections import defaultdict
 from datetime import date as date_cls
 from datetime import datetime, timedelta
 
+from sqlalchemy import func
+
 from app.core.database import SessionLocal
 from app.models.attendance import DailyAttendance, Employee
 from app.services.leave_service import get_leave_day_set
@@ -470,6 +472,18 @@ def get_schedule_matrix(
             "dates": [d.isoformat() for d in dates],
             "employees": matrix,
         }
+    finally:
+        db.close()
+
+
+def get_latest_attendance_date() -> str | None:
+    """The most recent date any attendance row exists for. Used by the
+    dashboard to fall back off "today" when the Time Pay sync for the
+    current day hasn't run yet."""
+    db = SessionLocal()
+    try:
+        latest = db.query(func.max(DailyAttendance.date)).scalar()
+        return latest.isoformat() if latest else None
     finally:
         db.close()
 

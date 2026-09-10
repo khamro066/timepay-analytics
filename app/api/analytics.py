@@ -9,6 +9,7 @@ from app.services.analytics_service import (
     get_day_of_week_stats,
     get_department_summary,
     get_employee_summary,
+    get_latest_attendance_date,
     get_lateness_distribution,
     get_schedule_matrix,
 )
@@ -39,6 +40,11 @@ def department_summary(date_from: str = Query(...), date_to: str = Query(...), i
 @router.get("/company/daily-stats")
 def daily_stats(date: str = Query(...), department: str | None = Query(None)):
     return get_daily_company_stats(date, department)
+
+
+@router.get("/company/latest-data-date")
+def latest_data_date():
+    return {"date": get_latest_attendance_date()}
 
 
 @router.get("/lateness-distribution")
