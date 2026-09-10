@@ -6,11 +6,50 @@ from sqlalchemy import func
 
 from app.core.database import SessionLocal
 from app.models.attendance import DailyAttendance, Employee
-from app.services.leave_service import get_leave_day_set
+from app.services.leave_service import get_leave_day_set, get_leave_reason_map
 
 
 def _parse_date(value: str) -> date_cls:
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+# A genuine early departure checks out inside this window. Below the floor
+# is an after-midnight stamp (they worked late, not early); at/above the
+# cutoff is a normal or long day — see _left_early.
+_EARLY_LEAVE_FLOOR_MINUTES = 6 * 60
+_EARLY_LEAVE_CUTOFF_MINUTES = 18 * 60
+
+
+def _time_to_minutes(value: str | None) -> int | None:
+    """"HH:MM" -> minutes since midnight, or None if unparseable."""
+    if not value:
+        return None
+    try:
+        hours, minutes = value.split(":")
+        return int(hours) * 60 + int(minutes)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _left_early(row: DailyAttendance) -> bool:
+    """Whether an employee genuinely left early on a working day.
+
+    Time Pay's early_leaving flag on its own is unreliable in real data:
+    about a third of the rows it flags have a check-out after 20:00 (a
+    full/long day), some have an after-midnight check-out like "00:03"
+    (they worked *late*), and early_leaving_minutes is unusable (values
+    over 1000). We keep the flag but additionally require the recorded
+    check-out to fall in a plausible early-departure window — between
+    06:00 and 18:00, and after that day's check-in (a check-out at or
+    before check-in on the clock means the stamp rolled past midnight).
+    """
+    if not (row.is_working_day and not row.absent and row.early_leaving):
+        return False
+    checkout = _time_to_minutes(row.last_check_out)
+    if checkout is None or not (_EARLY_LEAVE_FLOOR_MINUTES <= checkout < _EARLY_LEAVE_CUTOFF_MINUTES):
+        return False
+    checkin = _time_to_minutes(row.first_check_in)
+    return checkin is None or checkout > checkin
 
 
 def _avg_time_str(time_strings: list[str]) -> str | None:
@@ -491,7 +530,13 @@ def get_latest_attendance_date() -> str | None:
 def get_daily_company_stats(date: str, department: str | None = None) -> dict:
     """Today's headcount only ever reflects currently-active employees —
     paused/archived people never show up as "absent today". An optional
-    department narrows the counts to one business/branch."""
+    department narrows the counts to one business/branch.
+
+    late/absent/early_leaving are counted only on days is_working_day is
+    True, matching _summarize_rows: Time Pay leaves absent=True as filler
+    on people's days off, so counting those would report rest days as
+    absences on (e.g.) a Sunday when only part of the company is scheduled.
+    """
     day = _parse_date(date)
 
     db = SessionLocal()
@@ -505,13 +550,82 @@ def get_daily_company_stats(date: str, department: str | None = None) -> dict:
             query = query.filter(Employee.department == department)
         rows = query.all()
 
+        working = [r for r in rows if r.is_working_day]
+        present = [r for r in working if not r.absent]
+        late = sum(1 for r in present if r.late)
+        early = sum(1 for r in present if _left_early(r))
+        # "on time" here means arrived on time AND stayed the day, so the
+        # dashboard's four legend numbers line up 1:1 with the drill-down's
+        # four groups. late and early can overlap, so the four don't sum to
+        # the headcount — that's expected.
         return {
             "date": date,
             "total_employees": len(rows),
-            "present": sum(1 for r in rows if r.is_working_day and not r.absent),
-            "late": sum(1 for r in rows if r.late),
-            "absent": sum(1 for r in rows if r.absent),
+            "present": len(present),
+            "present_ontime": sum(1 for r in present if not r.late and not _left_early(r)),
+            "late": late,
+            "early_leaving": early,
+            "absent": sum(1 for r in working if r.absent),
             "on_leave": sum(1 for r in rows if r.on_leave),
         }
+    finally:
+        db.close()
+
+
+def get_company_daily_breakdown(date: str, department: str | None = None) -> dict:
+    """Per-employee attendance detail for a single day, powering the
+    dashboard drill-down. Same active-only / optional-department scoping as
+    get_daily_company_stats. An absent working day is tagged excused (with
+    the recorded reason) when a manually-entered EmployeeLeave range covers
+    it — otherwise it is an unexcused absence.
+
+    late and left_early are not mutually exclusive: someone can arrive late
+    and also leave early, and will be flagged for both. Rows the employee
+    was not scheduled to work (is_working_day false) are returned with all
+    flags false so the caller can drop or de-emphasise them.
+    """
+    day = _parse_date(date)
+
+    db = SessionLocal()
+    try:
+        query = (
+            db.query(DailyAttendance, Employee)
+            .join(Employee, Employee.id == DailyAttendance.employee_id)
+            .filter(DailyAttendance.date == day, Employee.status == "active")
+        )
+        if department:
+            query = query.filter(Employee.department == department)
+        rows = query.all()
+
+        employee_ids = {emp.id for _, emp in rows}
+        leave_days = get_leave_day_set(employee_ids, day, day)
+        leave_reasons = get_leave_reason_map(employee_ids, day, day)
+
+        people = []
+        for att, emp in rows:
+            working = bool(att.is_working_day)
+            absent = bool(working and att.absent)
+            excused = absent and (emp.id, day) in leave_days
+            people.append(
+                {
+                    "employee_id": emp.id,
+                    "full_name": emp.full_name,
+                    "department": emp.department,
+                    "position": emp.position,
+                    "profile_image": emp.profile_image,
+                    "is_working_day": working,
+                    "absent": absent,
+                    "late": bool(working and not att.absent and att.late),
+                    "late_minutes": att.late_minutes or 0,
+                    "left_early": _left_early(att),
+                    "first_check_in": att.first_check_in,
+                    "last_check_out": att.last_check_out,
+                    "excused": excused,
+                    "leave_reason": leave_reasons.get((emp.id, day)) if excused else None,
+                }
+            )
+
+        people.sort(key=lambda p: (p["full_name"] or "").lower())
+        return {"date": date, "department": department, "employees": people}
     finally:
         db.close()

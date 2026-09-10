@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import get_current_user
 from app.services.analytics_service import (
     get_all_employees_ranking,
+    get_company_daily_breakdown,
     get_daily_company_stats,
     get_day_of_week_stats,
     get_department_summary,
@@ -40,6 +41,11 @@ def department_summary(date_from: str = Query(...), date_to: str = Query(...), i
 @router.get("/company/daily-stats")
 def daily_stats(date: str = Query(...), department: str | None = Query(None)):
     return get_daily_company_stats(date, department)
+
+
+@router.get("/company/daily-breakdown")
+def daily_breakdown(date: str = Query(...), department: str | None = Query(None)):
+    return get_company_daily_breakdown(date, department)
 
 
 @router.get("/company/latest-data-date")

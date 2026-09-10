@@ -96,3 +96,38 @@ def get_leave_day_set(employee_ids: set[int], start: date_cls, end: date_cls) ->
         return day_set
     finally:
         db.close()
+
+
+def get_leave_reason_map(
+    employee_ids: set[int], start: date_cls, end: date_cls
+) -> dict[tuple[int, date_cls], str]:
+    """Like get_leave_day_set, but maps each covered (employee_id, date)
+    pair to the reason text of the leave range covering it — for callers
+    that need to show *why* a day is excused without a second query. On
+    overlapping ranges the most recently created leave wins."""
+    if not employee_ids:
+        return {}
+
+    db = SessionLocal()
+    try:
+        leaves = (
+            db.query(EmployeeLeave)
+            .filter(
+                EmployeeLeave.employee_id.in_(employee_ids),
+                EmployeeLeave.date_from <= end,
+                EmployeeLeave.date_to >= start,
+            )
+            .order_by(EmployeeLeave.created_at.asc())
+            .all()
+        )
+
+        reason_map: dict[tuple[int, date_cls], str] = {}
+        for leave in leaves:
+            day = max(leave.date_from, start)
+            last = min(leave.date_to, end)
+            while day <= last:
+                reason_map[(leave.employee_id, day)] = leave.reason
+                day += timedelta(days=1)
+        return reason_map
+    finally:
+        db.close()
