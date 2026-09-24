@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models.user import User
+from app.services.elevated_session_service import touch_and_check
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -37,3 +38,19 @@ def get_current_user(
         raise credentials_exception
 
     return user
+
+
+def require_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
+
+
+def require_elevated_session(current_user: User = Depends(require_admin_user)) -> User:
+    """A valid regular admin JWT alone is not enough here — the caller must
+    have separately re-entered their password via POST /api/auth/elevate
+    within the last DEFAULT_INACTIVITY_MINUTES. Used to gate sensitive
+    tools like attendance corrections behind step-up re-authentication."""
+    if not touch_and_check(current_user.username):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Elevated session required or expired")
+    return current_user
