@@ -6,7 +6,10 @@ from sqlalchemy import func
 
 from app.core.database import SessionLocal
 from app.models.attendance import DailyAttendance, Employee
+from app.services.corrections_service import EffectiveAttendance, apply_corrections
 from app.services.leave_service import get_leave_day_set, get_leave_reason_map
+
+AttendanceRow = DailyAttendance | EffectiveAttendance
 
 
 def _parse_date(value: str) -> date_cls:
@@ -31,7 +34,7 @@ def _time_to_minutes(value: str | None) -> int | None:
         return None
 
 
-def _left_early(row: DailyAttendance) -> bool:
+def _left_early(row: AttendanceRow) -> bool:
     """Whether an employee genuinely left early on a working day.
 
     Time Pay's early_leaving flag on its own is unreliable in real data:
@@ -76,7 +79,7 @@ def _format_worked_minutes(total_minutes: int) -> str:
     return f"{total_minutes // 60}h {total_minutes % 60}m"
 
 
-def _summarize_rows(rows: list[DailyAttendance], leave_days: set[tuple[int, date_cls]] | None = None) -> dict:
+def _summarize_rows(rows: list[AttendanceRow], leave_days: set[tuple[int, date_cls]] | None = None) -> dict:
     """Aggregates a set of DailyAttendance rows into summary metrics.
 
     "Expected working days" = rows where is_working_day is True.
@@ -146,7 +149,7 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
     db = SessionLocal()
     try:
         employee = db.get(Employee, employee_id)
-        rows = (
+        rows = apply_corrections(
             db.query(DailyAttendance)
             .filter(
                 DailyAttendance.employee_id == employee_id,
@@ -173,6 +176,7 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
                 "first_check_in": r.first_check_in,
                 "last_check_out": r.last_check_out,
                 "last_action": r.last_action,
+                "corrected": r.corrected,
             }
             for r in rows
         ]
@@ -201,13 +205,13 @@ def get_all_employees_ranking(
 
     db = SessionLocal()
     try:
-        rows = (
+        rows = apply_corrections(
             db.query(DailyAttendance)
             .filter(DailyAttendance.date >= start, DailyAttendance.date <= end)
             .all()
         )
 
-        rows_by_employee: dict[int, list[DailyAttendance]] = defaultdict(list)
+        rows_by_employee: dict[int, list[AttendanceRow]] = defaultdict(list)
         for row in rows:
             rows_by_employee[row.employee_id].append(row)
 
@@ -266,9 +270,11 @@ def get_department_summary(date_from: str, date_to: str, include_archived: bool 
         )
         if not include_archived:
             query = query.filter(Employee.status == "active")
-        rows = query.all()
+        raw_rows = query.all()
+        corrected_attendances = apply_corrections([a for a, _ in raw_rows])
+        rows = list(zip(corrected_attendances, [d for _, d in raw_rows]))
 
-        attendance_by_department: dict[str, list[DailyAttendance]] = defaultdict(list)
+        attendance_by_department: dict[str, list[AttendanceRow]] = defaultdict(list)
         employees_by_department: dict[str, set[int]] = defaultdict(set)
         all_employee_ids: set[int] = set()
         for attendance, department in rows:
@@ -334,7 +340,7 @@ def get_lateness_distribution(date_from: str, date_to: str, department: str | No
         )
         if department:
             query = query.filter(Employee.department == department)
-        rows = query.all()
+        rows = apply_corrections(query.all())
 
         counts = {key: 0 for key, _, _ in LATENESS_BUCKETS}
         for r in rows:
@@ -384,7 +390,7 @@ def get_day_of_week_stats(date_from: str, date_to: str, department: str | None =
         )
         if department:
             query = query.filter(Employee.department == department)
-        rows = query.all()
+        rows = apply_corrections(query.all())
 
         totals = [0] * 7
         late_counts = [0] * 7
@@ -412,7 +418,7 @@ def get_day_of_week_stats(date_from: str, date_to: str, department: str | None =
         db.close()
 
 
-def _schedule_day_status(row: DailyAttendance | None, excused: bool) -> str:
+def _schedule_day_status(row: AttendanceRow | None, excused: bool) -> str:
     """Status for a single employee/day cell in the schedule matrix.
 
     Precedence mirrors the Employee-detail calendar (EmployeeCalendarHeatmap):
@@ -461,13 +467,13 @@ def get_schedule_matrix(
 
     db = SessionLocal()
     try:
-        rows = (
+        rows = apply_corrections(
             db.query(DailyAttendance)
             .filter(DailyAttendance.date >= start, DailyAttendance.date <= end)
             .all()
         )
 
-        rows_by_employee: dict[int, dict[date_cls, DailyAttendance]] = defaultdict(dict)
+        rows_by_employee: dict[int, dict[date_cls, AttendanceRow]] = defaultdict(dict)
         for row in rows:
             rows_by_employee[row.employee_id][row.date] = row
 
@@ -548,7 +554,7 @@ def get_daily_company_stats(date: str, department: str | None = None) -> dict:
         )
         if department:
             query = query.filter(Employee.department == department)
-        rows = query.all()
+        rows = apply_corrections(query.all())
 
         working = [r for r in rows if r.is_working_day]
         present = [r for r in working if not r.absent]
@@ -595,7 +601,9 @@ def get_company_daily_breakdown(date: str, department: str | None = None) -> dic
         )
         if department:
             query = query.filter(Employee.department == department)
-        rows = query.all()
+        raw_rows = query.all()
+        corrected_attendances = apply_corrections([a for a, _ in raw_rows])
+        rows = list(zip(corrected_attendances, [e for _, e in raw_rows]))
 
         employee_ids = {emp.id for _, emp in rows}
         leave_days = get_leave_day_set(employee_ids, day, day)
