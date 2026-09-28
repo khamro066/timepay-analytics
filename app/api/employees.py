@@ -3,12 +3,13 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api.deps import get_current_user, require_elevated_session
+from app.api.deps import get_current_user, require_admin_user, require_elevated_session
 from app.core.database import SessionLocal
 from app.models.attendance import Employee
 from app.models.user import User
 from app.services.corrections_service import create_correction, list_corrections
 from app.services.leave_service import create_leave, delete_leave, list_leaves
+from app.services.manual_entry_service import create_or_update_manual_entry, has_daily_attendance_row
 
 router = APIRouter(prefix="/api/employees", tags=["employees"], dependencies=[Depends(get_current_user)])
 
@@ -130,3 +131,41 @@ def add_correction(
 @router.get("/{employee_id}/corrections")
 def get_corrections(employee_id: int, _current_user: User = Depends(require_elevated_session)):
     return list_corrections(employee_id)
+
+
+class ManualEntryRequest(BaseModel):
+    date: date
+    check_in: str
+    check_out: str
+    note: str | None = None
+
+
+@router.post("/{employee_id}/manual-entry")
+def add_manual_entry(
+    employee_id: int,
+    payload: ManualEntryRequest,
+    current_user: User = Depends(require_admin_user),
+):
+    """Regular admin auth only — no elevated session. This is routine,
+    transparent HR data entry (unlike corrections), and only ever applies
+    to a day Time Pay has no record of at all; a day it does have a
+    record for, even a wrong one, belongs to the corrections tool."""
+    _validate_time(payload.check_in, "check_in")
+    _validate_time(payload.check_out, "check_out")
+
+    db = SessionLocal()
+    try:
+        if db.get(Employee, employee_id) is None:
+            raise HTTPException(status_code=404, detail="Employee not found")
+    finally:
+        db.close()
+
+    if has_daily_attendance_row(employee_id, payload.date):
+        raise HTTPException(
+            status_code=409,
+            detail="A Time Pay record already exists for this date — use the corrections tool to fix it instead.",
+        )
+
+    return create_or_update_manual_entry(
+        employee_id, payload.date, payload.check_in, payload.check_out, payload.note, current_user.id
+    )

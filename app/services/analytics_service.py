@@ -6,7 +6,7 @@ from sqlalchemy import func
 
 from app.core.database import SessionLocal
 from app.models.attendance import DailyAttendance, Employee
-from app.services.corrections_service import EffectiveAttendance, apply_corrections
+from app.services.corrections_service import SOURCE_MANUAL, EffectiveAttendance, apply_corrections
 from app.services.leave_service import get_leave_day_set, get_leave_reason_map
 
 AttendanceRow = DailyAttendance | EffectiveAttendance
@@ -139,6 +139,7 @@ def _summarize_rows(rows: list[AttendanceRow], leave_days: set[tuple[int, date_c
         "overall_score": overall_score,
         "average_check_in_time": _avg_time_str([r.first_check_in for r in present_rows]),
         "average_check_out_time": _avg_time_str([r.last_check_out for r in present_rows]),
+        "manual_entry_days": sum(1 for r in rows if getattr(r, "source", None) == SOURCE_MANUAL),
     }
 
 
@@ -157,7 +158,10 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
                 DailyAttendance.date <= end,
             )
             .order_by(DailyAttendance.date)
-            .all()
+            .all(),
+            {employee_id},
+            start,
+            end,
         )
         leave_days = get_leave_day_set({employee_id}, start, end)
 
@@ -177,6 +181,7 @@ def get_employee_summary(employee_id: int, date_from: str, date_to: str) -> dict
                 "last_check_out": r.last_check_out,
                 "last_action": r.last_action,
                 "corrected": r.corrected,
+                "source": r.source,
             }
             for r in rows
         ]
@@ -205,35 +210,44 @@ def get_all_employees_ranking(
 
     db = SessionLocal()
     try:
-        rows = apply_corrections(
+        # Candidate employees decided up front (rather than derived from
+        # whichever employees happen to have a daily_attendance row) so an
+        # employee covered only by manual entries for the whole range still
+        # shows up.
+        employee_query = db.query(Employee)
+        if not include_archived:
+            employee_query = employee_query.filter(Employee.status == "active")
+        if department:
+            employee_query = employee_query.filter(Employee.department == department)
+        candidate_employees = employee_query.all()
+        candidate_ids = {e.id for e in candidate_employees}
+        employees = {e.id: e for e in candidate_employees}
+
+        raw_rows = (
             db.query(DailyAttendance)
-            .filter(DailyAttendance.date >= start, DailyAttendance.date <= end)
+            .filter(
+                DailyAttendance.employee_id.in_(candidate_ids),
+                DailyAttendance.date >= start,
+                DailyAttendance.date <= end,
+            )
             .all()
         )
+        rows = apply_corrections(raw_rows, candidate_ids, start, end)
 
         rows_by_employee: dict[int, list[AttendanceRow]] = defaultdict(list)
         for row in rows:
             rows_by_employee[row.employee_id].append(row)
 
-        employees = {e.id: e for e in db.query(Employee).all()}
-        leave_days = get_leave_day_set(set(rows_by_employee.keys()), start, end)
+        leave_days = get_leave_day_set(candidate_ids, start, end)
 
         ranking = []
         for employee_id, emp_rows in rows_by_employee.items():
             employee = employees.get(employee_id)
-            employee_department = employee.department if employee else None
-            if department and employee_department != department:
-                continue
-            # "active" is the only status included by default — paused and
-            # archived employees are hidden from rankings/reports unless the
-            # caller explicitly asks to see them (e.g. a historical report).
-            if not include_archived and employee is not None and employee.status != "active":
-                continue
             ranking.append(
                 {
                     "employee_id": employee_id,
                     "full_name": employee.full_name if employee else None,
-                    "department": employee_department,
+                    "department": employee.department if employee else None,
                     "position": employee.position if employee else None,
                     "profile_image": employee.profile_image if employee else None,
                     "status": employee.status if employee else None,
@@ -263,26 +277,31 @@ def get_department_summary(date_from: str, date_to: str, include_archived: bool 
 
     db = SessionLocal()
     try:
-        query = (
-            db.query(DailyAttendance, Employee.department)
-            .join(Employee, Employee.id == DailyAttendance.employee_id)
-            .filter(DailyAttendance.date >= start, DailyAttendance.date <= end)
-        )
+        employee_query = db.query(Employee)
         if not include_archived:
-            query = query.filter(Employee.status == "active")
-        raw_rows = query.all()
-        corrected_attendances = apply_corrections([a for a, _ in raw_rows])
-        rows = list(zip(corrected_attendances, [d for _, d in raw_rows]))
+            employee_query = employee_query.filter(Employee.status == "active")
+        candidate_employees = employee_query.all()
+        candidate_ids = {e.id for e in candidate_employees}
+        department_by_employee = {e.id: (e.department or "Unknown") for e in candidate_employees}
+
+        raw_rows = (
+            db.query(DailyAttendance)
+            .filter(
+                DailyAttendance.employee_id.in_(candidate_ids),
+                DailyAttendance.date >= start,
+                DailyAttendance.date <= end,
+            )
+            .all()
+        )
+        rows = apply_corrections(raw_rows, candidate_ids, start, end)
 
         attendance_by_department: dict[str, list[AttendanceRow]] = defaultdict(list)
         employees_by_department: dict[str, set[int]] = defaultdict(set)
-        all_employee_ids: set[int] = set()
-        for attendance, department in rows:
-            key = department or "Unknown"
+        for attendance in rows:
+            key = department_by_employee.get(attendance.employee_id, "Unknown")
             attendance_by_department[key].append(attendance)
             employees_by_department[key].add(attendance.employee_id)
-            all_employee_ids.add(attendance.employee_id)
-        leave_days = get_leave_day_set(all_employee_ids, start, end)
+        leave_days = get_leave_day_set(candidate_ids, start, end)
 
         summaries = []
         for department, dept_rows in attendance_by_department.items():
@@ -424,10 +443,12 @@ def _schedule_day_status(row: AttendanceRow | None, excused: bool) -> str:
     Precedence mirrors the Employee-detail calendar (EmployeeCalendarHeatmap):
     a missing row is "no_data" (a day with no file uploaded is not an
     absence — see the design-reference notes), then holiday / non-working
-    day take precedence over attendance, then an absence covered by a
-    recorded EmployeeLeave range is "excused", then plain absence, then
-    lateness, otherwise "on_time" (Time Pay can't tell "on time" from
-    "early", so the two are reported together — same as
+    day take precedence over attendance, then a manually-entered day (no
+    daily_attendance row at all, filled in from scratch) is always visibly
+    "manual" regardless of what a correction would otherwise show, then an
+    absence covered by a recorded EmployeeLeave range is "excused", then
+    plain absence, then lateness, otherwise "on_time" (Time Pay can't tell
+    "on time" from "early", so the two are reported together — same as
     get_lateness_distribution)."""
     if row is None:
         return "no_data"
@@ -435,6 +456,8 @@ def _schedule_day_status(row: AttendanceRow | None, excused: bool) -> str:
         return "holiday"
     if not row.is_working_day:
         return "day_off"
+    if row.source == SOURCE_MANUAL:
+        return "manual"
     if row.absent:
         return "excused" if excused else "absent"
     if row.late:
@@ -467,27 +490,36 @@ def get_schedule_matrix(
 
     db = SessionLocal()
     try:
-        rows = apply_corrections(
+        employee_query = db.query(Employee)
+        if not include_archived:
+            employee_query = employee_query.filter(Employee.status == "active")
+        if department:
+            employee_query = employee_query.filter(Employee.department == department)
+        candidate_employees = employee_query.all()
+        candidate_ids = {e.id for e in candidate_employees}
+        employees = {e.id: e for e in candidate_employees}
+
+        raw_rows = (
             db.query(DailyAttendance)
-            .filter(DailyAttendance.date >= start, DailyAttendance.date <= end)
+            .filter(
+                DailyAttendance.employee_id.in_(candidate_ids),
+                DailyAttendance.date >= start,
+                DailyAttendance.date <= end,
+            )
             .all()
         )
+        rows = apply_corrections(raw_rows, candidate_ids, start, end)
 
         rows_by_employee: dict[int, dict[date_cls, AttendanceRow]] = defaultdict(dict)
         for row in rows:
             rows_by_employee[row.employee_id][row.date] = row
 
-        employees = {e.id: e for e in db.query(Employee).all()}
-        leave_days = get_leave_day_set(set(rows_by_employee.keys()), start, end)
+        leave_days = get_leave_day_set(candidate_ids, start, end)
 
         matrix = []
         for employee_id, by_date in rows_by_employee.items():
             employee = employees.get(employee_id)
             employee_department = employee.department if employee else None
-            if department and employee_department != department:
-                continue
-            if not include_archived and employee is not None and employee.status != "active":
-                continue
 
             matrix.append(
                 {
@@ -547,14 +579,17 @@ def get_daily_company_stats(date: str, department: str | None = None) -> dict:
 
     db = SessionLocal()
     try:
-        query = (
-            db.query(DailyAttendance)
-            .join(Employee, Employee.id == DailyAttendance.employee_id)
-            .filter(DailyAttendance.date == day, Employee.status == "active")
-        )
+        employee_query = db.query(Employee).filter(Employee.status == "active")
         if department:
-            query = query.filter(Employee.department == department)
-        rows = apply_corrections(query.all())
+            employee_query = employee_query.filter(Employee.department == department)
+        candidate_ids = {e.id for e in employee_query.all()}
+
+        raw_rows = (
+            db.query(DailyAttendance)
+            .filter(DailyAttendance.employee_id.in_(candidate_ids), DailyAttendance.date == day)
+            .all()
+        )
+        rows = apply_corrections(raw_rows, candidate_ids, day, day)
 
         working = [r for r in rows if r.is_working_day]
         present = [r for r in working if not r.absent]
@@ -594,33 +629,36 @@ def get_company_daily_breakdown(date: str, department: str | None = None) -> dic
 
     db = SessionLocal()
     try:
-        query = (
-            db.query(DailyAttendance, Employee)
-            .join(Employee, Employee.id == DailyAttendance.employee_id)
-            .filter(DailyAttendance.date == day, Employee.status == "active")
-        )
+        employee_query = db.query(Employee).filter(Employee.status == "active")
         if department:
-            query = query.filter(Employee.department == department)
-        raw_rows = query.all()
-        corrected_attendances = apply_corrections([a for a, _ in raw_rows])
-        rows = list(zip(corrected_attendances, [e for _, e in raw_rows]))
+            employee_query = employee_query.filter(Employee.department == department)
+        candidate_employees = employee_query.all()
+        candidate_ids = {e.id for e in candidate_employees}
+        employees_by_id = {e.id: e for e in candidate_employees}
 
-        employee_ids = {emp.id for _, emp in rows}
-        leave_days = get_leave_day_set(employee_ids, day, day)
-        leave_reasons = get_leave_reason_map(employee_ids, day, day)
+        raw_rows = (
+            db.query(DailyAttendance)
+            .filter(DailyAttendance.employee_id.in_(candidate_ids), DailyAttendance.date == day)
+            .all()
+        )
+        rows = apply_corrections(raw_rows, candidate_ids, day, day)
+
+        leave_days = get_leave_day_set(candidate_ids, day, day)
+        leave_reasons = get_leave_reason_map(candidate_ids, day, day)
 
         people = []
-        for att, emp in rows:
+        for att in rows:
+            emp = employees_by_id.get(att.employee_id)
             working = bool(att.is_working_day)
             absent = bool(working and att.absent)
-            excused = absent and (emp.id, day) in leave_days
+            excused = absent and (att.employee_id, day) in leave_days
             people.append(
                 {
-                    "employee_id": emp.id,
-                    "full_name": emp.full_name,
-                    "department": emp.department,
-                    "position": emp.position,
-                    "profile_image": emp.profile_image,
+                    "employee_id": att.employee_id,
+                    "full_name": emp.full_name if emp else None,
+                    "department": emp.department if emp else None,
+                    "position": emp.position if emp else None,
+                    "profile_image": emp.profile_image if emp else None,
                     "is_working_day": working,
                     "absent": absent,
                     "late": bool(working and not att.absent and att.late),
@@ -629,7 +667,8 @@ def get_company_daily_breakdown(date: str, department: str | None = None) -> dic
                     "first_check_in": att.first_check_in,
                     "last_check_out": att.last_check_out,
                     "excused": excused,
-                    "leave_reason": leave_reasons.get((emp.id, day)) if excused else None,
+                    "leave_reason": leave_reasons.get((att.employee_id, day)) if excused else None,
+                    "source": att.source,
                 }
             )
 

@@ -4,7 +4,13 @@ from datetime import datetime
 from app.core.database import SessionLocal
 from app.models.attendance import DailyAttendance
 from app.models.attendance_correction import AttendanceCorrection
+from app.models.manual_attendance_entry import ManualAttendanceEntry
 from app.models.user import User
+from app.services.manual_entry_service import get_manual_entry_map
+
+SOURCE_TIME_PAY = "TIME_PAY"
+SOURCE_TIME_PAY_CORRECTED = "TIME_PAY_CORRECTED"
+SOURCE_MANUAL = "MANUAL"
 
 
 def _minutes_between(checkin: str | None, checkout: str | None) -> int | None:
@@ -24,18 +30,21 @@ def _minutes_between(checkin: str | None, checkout: str | None) -> int | None:
 
 
 class EffectiveAttendance:
-    """A DailyAttendance-shaped, read-only view with any admin correction
-    overlaid on top. Every analytics function reads attendance through
-    apply_corrections() below instead of the raw DailyAttendance rows, so
-    the corrected-vs-original decision lives in exactly one place rather
-    than being re-checked in every function that touches hours or
-    check-in/out times.
+    """A DailyAttendance-shaped, read-only view with any admin correction or
+    manual entry overlaid on top. Every analytics function reads attendance
+    through apply_corrections() below instead of the raw DailyAttendance
+    rows, so the corrected/manual-vs-original decision lives in exactly one
+    place rather than being re-checked in every function that touches hours
+    or check-in/out times.
 
     Only first_check_in, last_check_out, actual_worked_minutes, and absent
     can differ from the underlying row. late/late_minutes/early_leaving
     are left exactly as Time Pay recorded them: correcting a check-in/out
-    stamp doesn't give us the schedule data Time Pay used to judge
-    lateness, so we don't attempt to re-derive it.
+    stamp (or filling one in from scratch) doesn't give us the schedule
+    data Time Pay used to judge lateness, so we don't attempt to re-derive
+    it. `source` tells the frontend which of the three cases it is —
+    TIME_PAY_CORRECTED stays invisible everywhere except the hidden
+    corrections tool; MANUAL must be visibly tagged everywhere.
     """
 
     __slots__ = (
@@ -54,6 +63,7 @@ class EffectiveAttendance:
         "absent",
         "actual_worked_minutes",
         "corrected",
+        "source",
     )
 
     def __init__(self, row: DailyAttendance, correction: AttendanceCorrection | None):
@@ -77,11 +87,36 @@ class EffectiveAttendance:
             self.absent = False
             worked = _minutes_between(self.first_check_in, self.last_check_out)
             self.actual_worked_minutes = worked if worked is not None else row.actual_worked_minutes
+            self.source = SOURCE_TIME_PAY_CORRECTED
         else:
             self.first_check_in = row.first_check_in
             self.last_check_out = row.last_check_out
             self.absent = row.absent
             self.actual_worked_minutes = row.actual_worked_minutes
+            self.source = SOURCE_TIME_PAY
+
+    @classmethod
+    def from_manual_entry(cls, entry: ManualAttendanceEntry) -> "EffectiveAttendance":
+        """A day with no daily_attendance row at all, filled in entirely
+        from an admin-entered ManualAttendanceEntry."""
+        obj = cls.__new__(cls)
+        obj.employee_id = entry.employee_id
+        obj.date = entry.date
+        obj.is_working_day = True
+        obj.is_holiday = False
+        obj.on_leave = False
+        obj.late = False
+        obj.late_minutes = None
+        obj.early_leaving = False
+        obj.early_leaving_minutes = None
+        obj.last_action = None
+        obj.first_check_in = entry.check_in
+        obj.last_check_out = entry.check_out
+        obj.absent = False
+        obj.actual_worked_minutes = _minutes_between(entry.check_in, entry.check_out)
+        obj.corrected = False
+        obj.source = SOURCE_MANUAL
+        return obj
 
 
 def get_correction_map(
@@ -110,19 +145,53 @@ def get_correction_map(
         db.close()
 
 
-def apply_corrections(rows: list[DailyAttendance]) -> list[EffectiveAttendance]:
+def apply_corrections(
+    rows: list[DailyAttendance],
+    employee_ids: set[int] | None = None,
+    start: date_cls | None = None,
+    end: date_cls | None = None,
+) -> list[EffectiveAttendance]:
     """Overlays any admin correction onto each row's check-in/out (and the
     hours/presence derived from them), falling back to the original Time
-    Pay value when no correction exists for that day. Call this
-    immediately after every DailyAttendance query in analytics_service so
-    every caller downstream is correction-aware without needing to know
-    corrections exist at all."""
-    if not rows:
-        return []
-    employee_ids = {r.employee_id for r in rows}
-    dates = [r.date for r in rows]
-    correction_map = get_correction_map(employee_ids, min(dates), max(dates))
-    return [EffectiveAttendance(r, correction_map.get((r.employee_id, r.date))) for r in rows]
+    Pay value when no correction exists for that day. Also synthesizes an
+    entirely new day for any (employee_id, date) in `employee_ids` x
+    [start, end] that has a manual entry but no daily_attendance row at
+    all — the whole point of the manual-entry feature is filling a gap
+    Time Pay never recorded.
+
+    employee_ids/start/end default to being inferred from `rows` — the
+    original, corrections-only behavior — for callers that don't have a
+    natural "who/what range am I asking about" set of their own (e.g.
+    get_lateness_distribution, get_day_of_week_stats), since without an
+    explicit range there's no employee to attribute a manual-only day to.
+    Callers that already know their target employees/range (ranking,
+    employee summary, department summary, schedule matrix, the daily
+    company views) should pass them explicitly so an employee who is
+    *entirely* covered by manual entries for a day still shows up.
+
+    Call this immediately after every DailyAttendance query in
+    analytics_service so every caller downstream is correction/manual-entry
+    aware without needing to know either exists at all."""
+    if employee_ids is None:
+        employee_ids = {r.employee_id for r in rows}
+    if start is None or end is None:
+        dates = [r.date for r in rows]
+        if not dates:
+            return []
+        start, end = min(dates), max(dates)
+
+    correction_map = get_correction_map(employee_ids, start, end)
+    manual_map = get_manual_entry_map(employee_ids, start, end)
+
+    covered = {(r.employee_id, r.date) for r in rows}
+    effective = [EffectiveAttendance(r, correction_map.get((r.employee_id, r.date))) for r in rows]
+
+    for key, entry in manual_map.items():
+        if key not in covered:
+            effective.append(EffectiveAttendance.from_manual_entry(entry))
+
+    effective.sort(key=lambda r: (r.employee_id, r.date))
+    return effective
 
 
 def _serialize(db, correction: AttendanceCorrection) -> dict:
