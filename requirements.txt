@@ -8,3 +8,5 @@ bcrypt==5.0.0
 pyjwt==2.13.0
 openpyxl==3.1.5
 psycopg2-binary==2.9.12
+reportlab==5.0.1
+pillow==12.3.0
